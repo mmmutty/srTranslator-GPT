@@ -161,7 +161,7 @@ def main():
             st.info("🧠 Reasoning Model. Slower but deeper understanding.")
 
         st.markdown("---")
-        movie_title_input = st.text_input("Movie Title", value="The Great Escaper")
+        movie_title_input = st.text_input("Movie Title")
         target_lang_input = st.text_input("Target Language", value="Japanese")
         st.markdown("---")
         st.info("Ensure you have credit balance in OpenAI platform.")
