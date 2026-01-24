@@ -3,87 +3,150 @@ import re
 import time
 import json
 import requests
-import os
+from bs4 import BeautifulSoup
+from duckduckgo_search import DDGS  # 追加: 検索用
 
 # ==========================================
 # ⚙️ Configuration & Constants
 # ==========================================
 
-# Latest OpenAI Model List (Updated for 2026)
 CANDIDATE_MODELS = [
-    "gpt-4o-mini",      # 【おすすめ】最新の軽量モデル（爆速・激安・高性能）
-    "gpt-4o",           # 【最強】現在のフラッグシップモデル（賢いが価格はminiの約30倍）
-    "o1-mini",          # 【推理】思考型モデルの軽量版（字幕には少し遅いかも）
-    "gpt-4-turbo"       # 一つ前の高性能モデル
+    "gpt-4o-mini",      # 【おすすめ】コスパ最強
+    "gpt-4o",           # 【最強】精度重視
+    "gpt-4-turbo"
 ]
 
 # ==========================================
-# 🛠️ Function Definitions
+# 🛠️ Helper Functions (Web Search & Context)
 # ==========================================
 
-def find_working_model(api_key, log_area):
-    """Function to check OpenAI API connection"""
-    headers = {
-        'Content-Type': 'application/json',
-        'Authorization': f'Bearer {api_key}'
-    }
-    
-    # 接続テストは一番安いモデルで行う
-    test_data = {
-        "model": "gpt-4o-mini",
-        "messages": [{"role": "user", "content": "Test"}],
-        "max_tokens": 5
-    }
-
-    log_area.text(f"👉 Testing API connection...")
+def search_movie_context(movie_title):
+    """
+    映画タイトルから脚本やあらすじを検索し、テキスト情報を取得する
+    """
+    # 検索クエリ: タイトル + script/synopsis/transcript
+    query = f"{movie_title} movie script transcript synopsis characters plot"
     
     try:
-        response = requests.post(
-            "https://api.openai.com/v1/chat/completions", 
-            headers=headers, 
-            data=json.dumps(test_data), 
-            timeout=10
-        )
-        
-        if response.status_code == 200:
-            log_area.success(f"✅ Connection successful! Ready to use OpenAI.")
-            return True
-        else:
-            try:
-                error_msg = response.json().get('error', {}).get('message', response.text)
-            except:
-                error_msg = response.text
-            st.warning(f"⚠️ Connection failed (Status: {response.status_code})\nReason: {error_msg}")
-            return False
+        # DuckDuckGoで検索 (上位3件)
+        results = DDGS().text(query, max_results=3)
+        if not results:
+            return None
             
+        combined_text = ""
+        # 検索結果のURLからテキストを取得（簡易スクレイピング）
+        for res in results:
+            url = res['href']
+            try:
+                # タイムアウトを短めに設定して取得
+                page = requests.get(url, timeout=3)
+                if page.status_code == 200:
+                    soup = BeautifulSoup(page.content, 'html.parser')
+                    # <p>タグのテキストを集める（本文の可能性が高いため）
+                    paragraphs = [p.get_text() for p in soup.find_all('p')]
+                    # 最初の3000文字程度を取得（トークン節約）
+                    text_content = " ".join(paragraphs)[:3000]
+                    combined_text += f"\n--- Source: {url} ---\n{text_content}\n"
+            except:
+                continue
+        
+        return combined_text if combined_text else None
     except Exception as e:
-        st.error(f"📡 Connection Error: {str(e)}")
-        return False
+        # エラー時はNoneを返して翻訳処理自体は止めない
+        print(f"Search Error: {e}")
+        return None
 
-def split_srt_blocks(srt_content):
-    # Enhanced logic to prevent syncing issues
-    content = srt_content.replace('\r\n', '\n').replace('\r', '\n')
-    blocks = re.split(r'\n\s*\n', content.strip())
-    return [b for b in blocks if b.strip()]
-
-def sanitize_timecode(time_str):
-    """Strictly format timecode for Web tools"""
-    t = re.sub(r'\s*[-=]+>\s*', ' --> ', time_str)
-    t = t.replace('.', ',')
-    return t
-
-def translate_block_openai(text, api_key, model_name, movie_title, target_language):
+def generate_style_guide(api_key, movie_title, raw_web_text):
+    """
+    Webの情報を基に、翻訳用のスタイルガイド（設定資料）をAIに作成させる
+    """
     url = "https://api.openai.com/v1/chat/completions"
     headers = {
         'Content-Type': 'application/json',
         'Authorization': f'Bearer {api_key}'
     }
     
-    # プロンプトの定義
+    # 指示書作成用のプロンプト
+    system_prompt = f"""
+    You are an expert movie localization director.
+    Read the provided web content about the movie "{movie_title}".
+    Create a concise "Translation Style Guide" for Japanese subtitles.
+    
+    Output Format:
+    - **Genre & Tone**: (e.g., Serious, Slang-heavy, Historical, Comedy)
+    - **Key Characters & Relationships**: (Who is talking to whom? e.g., "Jack and Rose are lovers", "Boss and subordinate")
+    - **Speaking Style**: (e.g., "Use polite Desu/Masu", "Use rough Yakuza slang", "Old Samurai dialect")
+    - **Plot Summary**: (Very brief summary to understand context)
+    """
+
+    data = {
+        "model": "gpt-4o-mini", # 安価なモデルで十分
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Web Content:\n{raw_web_text}"}
+        ]
+    }
+
+    try:
+        response = requests.post(url, headers=headers, data=json.dumps(data), timeout=20)
+        if response.status_code == 200:
+            return response.json()['choices'][0]['message']['content']
+    except:
+        pass
+    return None
+
+# ==========================================
+# 🛠️ Core Functions
+# ==========================================
+
+def find_working_model(api_key, log_area):
+    headers = {'Content-Type': 'application/json', 'Authorization': f'Bearer {api_key}'}
+    test_data = {"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "Test"}], "max_tokens": 5}
+    log_area.text(f"👉 Testing API connection...")
+    try:
+        response = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, data=json.dumps(test_data), timeout=10)
+        if response.status_code == 200:
+            log_area.success(f"✅ Connection successful!")
+            return True
+        else:
+            st.warning(f"⚠️ Connection failed (Status: {response.status_code})")
+            return False
+    except Exception as e:
+        st.error(f"📡 Connection Error: {str(e)}")
+        return False
+
+def split_srt_blocks(srt_content):
+    content = srt_content.replace('\r\n', '\n').replace('\r', '\n')
+    blocks = re.split(r'\n\s*\n', content.strip())
+    return [b for b in blocks if b.strip()]
+
+def sanitize_timecode(time_str):
+    t = re.sub(r'\s*[-=]+>\s*', ' --> ', time_str)
+    return t.replace('.', ',')
+
+def translate_block_openai(text, api_key, model_name, movie_title, target_language, style_guide=None):
+    url = "https://api.openai.com/v1/chat/completions"
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {api_key}'
+    }
+    
+    # スタイルガイドがある場合はプロンプトに注入する
+    context_instruction = ""
+    if style_guide:
+        context_instruction = f"""
+        [CONTEXT & STYLE GUIDE]
+        {style_guide}
+        
+        IMPORTANT: Translate based on the characters and tones described above.
+        """
+    
     system_prompt = f"""
     You are a professional film subtitle translator.
     Translate the dialogue into natural, emotional {target_language}.
     Movie: {movie_title}
+    
+    {context_instruction}
     
     Rules:
     1. Output ONLY the translated text. No notes.
@@ -91,39 +154,24 @@ def translate_block_openai(text, api_key, model_name, movie_title, target_langua
     3. Keep it concise for subtitles.
     """
     
-    # モデルごとの仕様対応（o1系はtemperatureなどが使えない場合があるため調整）
-    if model_name.startswith("o1"):
-        # o1モデルは "system" ロールが推奨されない場合があるため "user" に統合するか、
-        # "developer" ロールを使うが、簡易的にuserで処理
-        messages = [
-            {"role": "user", "content": f"{system_prompt}\n\nOriginal Text to Translate:\n{text}"}
-        ]
-        data = {
-            "model": model_name,
-            "messages": messages,
-            # o1系は max_completion_tokens を使うが、汎用性のためパラメータを最小限に
-        }
-    else:
-        # GPT-4o系
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": text}
-        ]
-        data = {
-            "model": model_name,
-            "messages": messages,
-            "temperature": 0.3
-        }
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": text}
+    ]
+    
+    data = {
+        "model": model_name,
+        "messages": messages,
+        "temperature": 0.3
+    }
 
     for attempt in range(3):
         try:
-            response = requests.post(url, headers=headers, data=json.dumps(data), timeout=60) # o1は遅いのでタイムアウト長め
+            response = requests.post(url, headers=headers, data=json.dumps(data), timeout=60)
             if response.status_code == 200:
-                result = response.json()
-                content = result['choices'][0]['message']['content'].strip()
+                content = response.json()['choices'][0]['message']['content'].strip()
                 return content if content else text
             elif response.status_code == 429:
-                # Rate limit
                 time.sleep(5)
                 continue
             else:
@@ -132,7 +180,6 @@ def translate_block_openai(text, api_key, model_name, movie_title, target_langua
         except:
             time.sleep(1)
             continue
-            
     return text
 
 # ==========================================
@@ -140,111 +187,126 @@ def translate_block_openai(text, api_key, model_name, movie_title, target_langua
 # ==========================================
 
 def main():
-    st.set_page_config(page_title="AI Subtitle Translator (OpenAI)", layout="wide")
-    
+    st.set_page_config(page_title="AI Subtitle Translator + Web Context", layout="wide")
     st.title("🎬 AI Subtitles Translator (ChatGPT)")
 
     with st.sidebar:
         st.header("Settings")
-        api_key_input = st.text_input("OpenAI API Key", type="password", placeholder="sk-...")
-        st.markdown("---")
-        
-        # Model Selection
+        api_key_input = st.text_input("OpenAI API Key", type="password")
         selected_model = st.selectbox("Select Model", CANDIDATE_MODELS, index=0)
-        
-        # モデルの説明表示
-        if selected_model == "gpt-4o-mini":
-            st.success("✅ Recommended! Fastest & Cheapest.")
-        elif selected_model == "gpt-4o":
-            st.warning("💰 High Cost. Highest Quality.")
-        elif selected_model.startswith("o1"):
-            st.info("🧠 Reasoning Model. Slower but deeper understanding.")
-
         st.markdown("---")
-        movie_title_input = st.text_input("Movie Title")
+        
+        # 映画タイトル入力（検索に必須）
+        movie_title_input = st.text_input("Movie Title (Required for Context)", help="正確に入力すると検索精度が上がります")
         target_lang_input = st.text_input("Target Language", value="Japanese")
-        st.markdown("---")
-        st.info("Ensure you have credit balance in OpenAI platform.")
-
-    uploaded_file = st.file_uploader("Drag and drop your SRT file here", type=["srt"])
-
-    if uploaded_file is not None:
-        st.success(f"File loaded: {uploaded_file.name}")
         
-        if st.button("Start Translation", type="primary"):
-            if not api_key_input:
-                st.error("⚠️ Please enter your API Key in the sidebar.")
-                return
+        # コンテキスト検索機能のON/OFF
+        use_context = st.checkbox("🔍 Search Web for Context", value=True, help="ネットから脚本やあらすじを探して翻訳精度を上げます")
 
-            status_area = st.empty()
-            log_area = st.empty()
-            progress_bar = st.progress(0)
+    uploaded_file = st.file_uploader("Upload SRT file", type=["srt"])
 
-            # Check connection
-            if find_working_model(api_key_input, log_area):
-                content = uploaded_file.getvalue().decode("utf-8", errors="ignore")
-                blocks = split_srt_blocks(content)
-                total_blocks = len(blocks)
-                translated_srt = []
+    if uploaded_file is not None and st.button("Start Translation", type="primary"):
+        if not api_key_input:
+            st.error("⚠️ API Key is missing.")
+            return
+        if use_context and not movie_title_input:
+            st.warning("⚠️ To use Web Search, please enter the 'Movie Title'.")
+            return
+
+        status_area = st.empty()
+        log_area = st.empty()
+        context_expander = st.expander("📚 Generated Style Guide (Context)", expanded=False)
+        progress_bar = st.progress(0)
+
+        if find_working_model(api_key_input, log_area):
+            
+            # --- PHASE 1: Web Context Search & Analysis ---
+            style_guide = None
+            if use_context:
+                status_area.info(f"🌍 Searching web for info about '{movie_title_input}'...")
                 
-                status_area.info(f"🚀 Starting translation... Total {total_blocks} blocks (Model: {selected_model})")
+                # 1. 検索 & スクレイピング
+                raw_web_data = search_movie_context(movie_title_input)
                 
-                for i, block in enumerate(blocks):
-                    lines = block.split('\n')
-                    if len(lines) >= 2:
-                        seq_num = lines[0].strip()
-                        
-                        time_line_index = -1
-                        for idx, line in enumerate(lines):
-                            if '-->' in line:
-                                time_line_index = idx
-                                break
-                        
-                        if time_line_index != -1:
-                            timecode = lines[time_line_index].strip()
-                            original_text = "\n".join(lines[time_line_index + 1:])
-                            
-                            if original_text.strip():
-                                translated_text = translate_block_openai(
-                                    original_text, 
-                                    api_key_input, 
-                                    selected_model, 
-                                    movie_title_input, 
-                                    target_lang_input
-                                )
-                            else:
-                                translated_text = ""
-                            
-                            clean_time = sanitize_timecode(timecode)
-                            new_block = f"{seq_num}\r\n{clean_time}\r\n{translated_text}\r\n\r\n"
-                            translated_srt.append(new_block)
-                        else:
-                            translated_srt.append(block.replace('\n', '\r\n') + "\r\n\r\n")
+                if raw_web_data:
+                    status_area.info("📝 Generating style guide from web data...")
+                    # 2. 情報を要約してスタイルガイド作成
+                    style_guide = generate_style_guide(api_key_input, movie_title_input, raw_web_data)
+                    
+                    if style_guide:
+                        context_expander.markdown(style_guide) # ユーザーに見えるように表示
+                        st.toast("Style Guide Created Successfully!", icon="✅")
                     else:
-                        translated_srt.append(block.replace('\n', '\r\n') + "\r\n\r\n")
+                        st.warning("Could not generate style guide.")
+                else:
+                    st.warning("No relevant info found on the web. Proceeding without context.")
+            
+            # --- PHASE 2: Translation ---
+            content = uploaded_file.getvalue().decode("utf-8", errors="ignore")
+            blocks = split_srt_blocks(content)
+            total_blocks = len(blocks)
+            translated_srt = []
+            
+            status_area.info(f"🚀 Translating {total_blocks} blocks with Context...")
+            
+            for i, block in enumerate(blocks):
+                lines = block.split('\n')
+                if len(lines) >= 2:
+                    # 時間情報の行を探す
+                    time_line_index = -1
+                    for idx, line in enumerate(lines):
+                        if '-->' in line:
+                            time_line_index = idx
+                            break
                     
-                    progress = (i + 1) / total_blocks
-                    progress_bar.progress(progress)
-                    
-                    if (i + 1) % 10 == 0:
-                         log_area.text(f"⏳ Processing... {i + 1}/{total_blocks} completed")
-                    
-                    # 4o-miniは非常に高速ですが、連続リクエスト制限(Rate Limit)を避けるため少し待機
-                    time.sleep(0.1)
+                    if time_line_index != -1:
+                        seq_num = lines[0]
+                        timecode = lines[time_line_index]
+                        original_text = "\n".join(lines[time_line_index + 1:])
+                        
+                        if original_text.strip():
+                            # 翻訳実行（style_guideを渡す）
+                            translated_text = translate_block_openai(
+                                original_text, 
+                                api_key_input, 
+                                selected_model, 
+                                movie_title_input, 
+                                target_lang_input,
+                                style_guide=style_guide
+                            )
+                        else:
+                            translated_text = ""
+                        
+                        clean_time = sanitize_timecode(timecode)
+                        new_block = f"{seq_num}\r\n{clean_time}\r\n{translated_text}\r\n\r\n"
+                        translated_srt.append(new_block)
+                    else:
+                        translated_srt.append(block + "\r\n\r\n")
+                else:
+                    translated_srt.append(block + "\r\n\r\n")
+                
+                # 進捗更新
+                progress = (i + 1) / total_blocks
+                progress_bar.progress(progress)
+                if (i + 1) % 5 == 0:
+                    log_area.text(f"⏳ Processing... {i + 1}/{total_blocks}")
+                
+                # レート制限対策
+                time.sleep(0.05)
 
-                progress_bar.progress(1.0)
-                status_area.success("✅ Translation & Formatting Complete!")
-                log_area.empty()
-                
-                final_content = "".join(translated_srt)
-                new_filename = f"{uploaded_file.name.replace('.srt', '')}_{target_lang_input}_{selected_model}_WebReady.srt"
-                
-                st.download_button(
-                    label="📥 Download Translated SRT",
-                    data=final_content.encode('utf-8-sig'),
-                    file_name=new_filename,
-                    mime="text/plain"
-                )
+            progress_bar.progress(1.0)
+            status_area.success("✅ Complete!")
+            
+            # ダウンロードボタン
+            final_content = "".join(translated_srt)
+            new_filename = f"{uploaded_file.name.replace('.srt', '')}_AI_WebContext.srt"
+            
+            st.download_button(
+                label="📥 Download Translated SRT",
+                data=final_content.encode('utf-8-sig'),
+                file_name=new_filename,
+                mime="text/plain"
+            )
 
 if __name__ == "__main__":
     main()
