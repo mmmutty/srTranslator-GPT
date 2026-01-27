@@ -124,39 +124,35 @@ def sanitize_timecode(time_str):
     t = re.sub(r'\s*[-=]+>\s*', ' --> ', time_str)
     return t.replace('.', ',')
 
-def translate_block_openai(text, api_key, model_name, movie_title, target_language, style_guide=None):
+def translate_block_openai(text, api_key, model_name, movie_title, target_language, style_guide=None, previous_context=None):
     url = "https://api.openai.com/v1/chat/completions"
     headers = {
         'Content-Type': 'application/json',
         'Authorization': f'Bearer {api_key}'
     }
     
-    # スタイルガイドがある場合はプロンプトに注入する
-    context_instruction = ""
+    # 文脈情報の構築
+    context_str = ""
     if style_guide:
-        context_instruction = f"""
-        [CONTEXT & STYLE GUIDE]
-        {style_guide}
-        
-        IMPORTANT: Translate based on the characters and tones described above.
-        """
+        context_str += f"[MOVIE SETTING]\n{style_guide}\n\n"
     
+    if previous_context:
+        context_str += f"[PREVIOUS CONVERSATION]\n{previous_context}\n(Use this to understand the flow, but DO NOT translate these lines.)\n\n"
+
     system_prompt = f"""
-    You are a professional film subtitle translator.
-    Translate the dialogue into natural, emotional {target_language}.
-    Movie: {movie_title}
-    
-    {context_instruction}
-    
-    Rules:
-    1. Output ONLY the translated text. No notes.
-    2. Do NOT output timecodes.
-    3. Keep it concise for subtitles.
+    You are a professional subtitle translator for the movie "{movie_title}".
+    Translate the [CURRENT LINE] into natural {target_language}.
+
+    Guidelines:
+    1. **Context Aware**: Look at [PREVIOUS CONVERSATION] to determine omitted subjects (who is "I", "You", "He"?) and the correct nuance.
+       - Example: If previous line is "You are talented", "It's natural" -> "生まれつきさ" (Not "自然体").
+    2. **Character Tone**: Reflect the character's personality defined in [MOVIE SETTING].
+    3. **Format**: Output ONLY the translated text for [CURRENT LINE]. No quotes, no notes.
     """
     
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": text}
+        {"role": "user", "content": f"[CURRENT LINE]\n{text}"}
     ]
     
     data = {
@@ -165,6 +161,7 @@ def translate_block_openai(text, api_key, model_name, movie_title, target_langua
         "temperature": 0.3
     }
 
+    # リトライ処理などは既存と同じ
     for attempt in range(3):
         try:
             response = requests.post(url, headers=headers, data=json.dumps(data), timeout=60)
@@ -247,12 +244,14 @@ def main():
             total_blocks = len(blocks)
             translated_srt = []
             
-            status_area.info(f"🚀 Translating {total_blocks} blocks with Context...")
+            # ★追加: 直前の会話を保存するリスト（バッファ）
+            conversation_history = [] 
+            
+            status_area.info(f"🚀 Translating {total_blocks} blocks with Context Flow...")
             
             for i, block in enumerate(blocks):
                 lines = block.split('\n')
                 if len(lines) >= 2:
-                    # 時間情報の行を探す
                     time_line_index = -1
                     for idx, line in enumerate(lines):
                         if '-->' in line:
@@ -265,15 +264,24 @@ def main():
                         original_text = "\n".join(lines[time_line_index + 1:])
                         
                         if original_text.strip():
-                            # 翻訳実行（style_guideを渡す）
+                            # ★変更: 直近3件の履歴をテキスト化して渡す
+                            previous_context_str = "\n".join(conversation_history[-3:]) # 直前3ブロック分
+                            
                             translated_text = translate_block_openai(
                                 original_text, 
                                 api_key_input, 
                                 selected_model, 
                                 movie_title_input, 
                                 target_lang_input,
-                                style_guide=style_guide
+                                style_guide=style_guide,
+                                previous_context=previous_context_str # ★ここで過去の文脈を渡す
                             )
+                            
+                            # ★追加: 翻訳に使った原文を履歴に追加
+                            # (改行を除去して1行にして保存すると読みやすい)
+                            clean_original = original_text.replace('\n', ' ')
+                            conversation_history.append(clean_original)
+                            
                         else:
                             translated_text = ""
                         
@@ -285,13 +293,11 @@ def main():
                 else:
                     translated_srt.append(block + "\r\n\r\n")
                 
-                # 進捗更新
+                # --- 以下、進捗バーなどの既存コード ---
                 progress = (i + 1) / total_blocks
                 progress_bar.progress(progress)
                 if (i + 1) % 5 == 0:
                     log_area.text(f"⏳ Processing... {i + 1}/{total_blocks}")
-                
-                # レート制限対策
                 time.sleep(0.05)
 
             progress_bar.progress(1.0)
