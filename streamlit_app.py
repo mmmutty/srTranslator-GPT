@@ -10,10 +10,13 @@ from duckduckgo_search import DDGS  # 追加: 検索用
 # ⚙️ Configuration & Constants
 # ==========================================
 
+# Latest OpenAI Model List (Updated for 2026)
 CANDIDATE_MODELS = [
-    "gpt-4o-mini",      # 【おすすめ】コスパ最強
-    "gpt-4o",           # 【最強】精度重視
-    "gpt-4-turbo"
+    "gpt-5.2",          # 【最新】最強モデル。4oより賢くて少し安い。迷ったらこれ。
+    "gpt-5-mini",       # 【コスパ】4o-miniの上位互換。安くてそこそこ賢い。
+    "gpt-5-nano",       # 【爆速】最安・最速。簡単な翻訳ならこれで十分。
+    "gpt-5.2-pro",      # 【超高性能】複雑な推論用。非常に高いので映画翻訳にはオーバースペックかも。
+    "gpt-4o",           # (旧) 安定版
 ]
 
 # ==========================================
