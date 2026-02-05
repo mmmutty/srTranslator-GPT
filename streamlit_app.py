@@ -153,8 +153,8 @@ def translate_batch(lines, api_key, model_name, movie_title, target_lang, style_
 # ==========================================
 
 def main():
-    st.set_page_config(page_title="AI Subtitle Translator", layout="wide")
-    st.title("🎬 AI Subtitles Translator Pro (ChatGPT)")
+    st.set_page_config(page_title="AI Subtitle Translator Pro", layout="wide")
+    st.title("🎬 AI Subtitles Translator Pro (Batch Mode)")
 
     with st.sidebar:
         api_key = st.text_input("OpenAI API Key", type="password")
