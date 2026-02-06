@@ -10,16 +10,14 @@ from duckduckgo_search import DDGS
 # ⚙️ Configuration & Constants
 # ==========================================
 
-# あなたの環境（2026年版）に合わせてリストを更新しました
 CANDIDATE_MODELS = [
-    "gpt-5.2",          # 【本命】最強モデル
-    "gpt-5-mini",       # 【コスパ】テスト用・高速
+    "gpt-5.2",          # 【本命】推奨：賢くて4oより少し安い
+    "gpt-5-mini",       # 【コスパ】テスト用
     "gpt-5.2-pro",      # 【超高性能】思考型
-    "gpt-4o",           # 【安定】旧モデル
+    "gpt-4o",           # 【安定】
     "gpt-5-nano"        # 【最安】
 ]
 
-# バッチサイズ（一度に翻訳する行数）
 BATCH_SIZE = 20 
 
 # ==========================================
@@ -27,7 +25,6 @@ BATCH_SIZE = 20
 # ==========================================
 
 def search_movie_context(movie_title):
-    """映画の情報を検索して取得"""
     query = f"{movie_title} movie script synopsis characters plot"
     try:
         results = DDGS().text(query, max_results=3)
@@ -47,9 +44,9 @@ def search_movie_context(movie_title):
 def generate_style_guide(api_key, movie_title, raw_web_text):
     url = "https://api.openai.com/v1/chat/completions"
     headers = {'Content-Type': 'application/json', 'Authorization': f'Bearer {api_key}'}
-    prompt = f"Read the info about '{movie_title}' and create a translation style guide (Genre, Tone, Characters)."
+    prompt = f"Read the info about '{movie_title}' and create a translation style guide."
     data = {
-        "model": "gpt-5-mini", # 設定作成にはminiを使用
+        "model": "gpt-5-mini", 
         "messages": [{"role": "system", "content": prompt}, {"role": "user", "content": raw_web_text}]
     }
     try:
@@ -58,11 +55,16 @@ def generate_style_guide(api_key, movie_title, raw_web_text):
     except: return None
 
 def check_api(api_key):
-    """API接続テスト（あなたの環境に合わせてgpt-5-miniでテスト）"""
+    """API接続テスト（修正済み）"""
     try:
         headers = {'Authorization': f'Bearer {api_key}'}
-        # ★ここをあなたの環境にある 'gpt-5-mini' に変更しました
-        data = {"model": "gpt-5-mini", "messages": [{"role":"user", "content":"hi"}], "max_tokens":1}
+        
+        # ★ここを修正: 'max_tokens' ではなく 'max_completion_tokens' を使用
+        data = {
+            "model": "gpt-5-mini", 
+            "messages": [{"role":"user", "content":"hi"}], 
+            "max_completion_tokens": 1  # ←ここが変わりました！
+        }
         
         res = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=data, timeout=10)
         
@@ -108,6 +110,8 @@ def translate_batch(lines, api_key, model_name, movie_title, target_lang, style_
         ],
         "response_format": {"type": "json_object"}
     }
+    
+    # 翻訳時はトークン制限をかけないので max_tokens パラメータは不要（削除済み）
 
     for _ in range(3):
         try:
@@ -141,7 +145,6 @@ def main():
 
     with st.sidebar:
         api_key = st.text_input("OpenAI API Key", type="password")
-        # gpt-5.2 をデフォルトに設定
         model = st.selectbox("Model", CANDIDATE_MODELS, index=0)
         st.markdown("---")
         title = st.text_input("Movie Title")
