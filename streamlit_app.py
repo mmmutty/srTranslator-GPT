@@ -55,15 +55,15 @@ def generate_style_guide(api_key, movie_title, raw_web_text):
     except: return None
 
 def check_api(api_key):
-    """API接続テスト（修正済み）"""
+    """API接続テスト（再修正済み）"""
     try:
         headers = {'Authorization': f'Bearer {api_key}'}
         
-        # ★ここを修正: 'max_tokens' ではなく 'max_completion_tokens' を使用
+        # ★ここを修正: "1" だと短すぎて思考できないので "100" に増やしました
         data = {
             "model": "gpt-5-mini", 
             "messages": [{"role":"user", "content":"hi"}], 
-            "max_completion_tokens": 1  # ←ここが変わりました！
+            "max_completion_tokens": 100 
         }
         
         res = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=data, timeout=10)
