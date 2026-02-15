@@ -88,18 +88,23 @@ def translate_batch(lines, api_key, model_name, movie_title, target_lang, style_
     url = "https://api.openai.com/v1/chat/completions"
     headers = {'Content-Type': 'application/json', 'Authorization': f'Bearer {api_key}'}
 
-    input_text = "\n".join([f"[{i+1}] {line}" for i, line in enumerate(lines)])
+    # ★AIが混乱しないよう、入力に「番号札(ID)」をつけて辞書型（JSON）にする
+    input_dict = {str(i+1): line for i, line in enumerate(lines)}
+    input_text = json.dumps(input_dict, ensure_ascii=False)
+    
     context_str = ""
     if style_guide: context_str += f"[MOVIE INFO]\n{style_guide}\n"
     if previous_summary: context_str += f"[PREVIOUS CONTEXT]\n{previous_summary}\n"
 
     system_prompt = f"""
     You are a professional subtitle translator for "{movie_title}".
-    Translate the following {len(lines)} lines into natural {target_lang}.
+    Translate the provided JSON values into natural {target_lang}.
     {context_str}
     Rules:
-    1. Output format must be a JSON list of strings.
-    Example: ["こんにちは。", "元気？"]
+    1. Output MUST be a valid JSON object matching the input keys (IDs).
+    2. Do NOT translate the keys, only translate the values.
+    Example Output:
+    {{"1": "こんにちは。", "2": "元気？"}}
     """
 
     data = {
@@ -108,32 +113,40 @@ def translate_batch(lines, api_key, model_name, movie_title, target_lang, style_
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": input_text}
         ],
-        "response_format": {"type": "json_object"}
+        "response_format": {"type": "json_object"},
+        # ★思考時間と出力をカバーするために、出力上限をたっぷり確保
+        "max_completion_tokens": 4000 
     }
-    
-    # 翻訳時はトークン制限をかけないので max_tokens パラメータは不要（削除済み）
 
-    for _ in range(3):
+    for _ in range(3): # エラー時は3回まで再挑戦
         try:
-            res = requests.post(url, headers=headers, data=json.dumps(data), timeout=120)
+            res = requests.post(url, headers=headers, data=json.dumps(data), timeout=150)
             if res.status_code == 200:
                 content = res.json()['choices'][0]['message']['content']
                 parsed = json.loads(content)
-                if isinstance(parsed, dict):
-                    values = list(parsed.values())
-                    if values and isinstance(values[0], list): return values[0]
-                elif isinstance(parsed, list): return parsed
-                return lines
+                
+                # ★番号札（ID）に基づいて順番通りに翻訳リストを再構築
+                translated_lines = []
+                for i in range(len(lines)):
+                    key = str(i + 1)
+                    if key in parsed and parsed[key].strip():
+                        translated_lines.append(parsed[key])
+                    else:
+                        # もしAIが翻訳を忘れた行があっても、その1行だけ原文を残して他は救う
+                        translated_lines.append(lines[i]) 
+                return translated_lines
+
             elif res.status_code == 429:
                 time.sleep(5)
                 continue
             else:
                 print(f"Translation Error: {res.text}")
-                time.sleep(1)
+                time.sleep(2)
         except Exception as e:
-            print(e)
-            time.sleep(1)
-    return lines
+            print(f"Exception: {e}")
+            time.sleep(2)
+            
+    return lines # 3回とも失敗した時だけ、そのバッチ全体を原文で返す
 
 # ==========================================
 # 🖥️ Main App
