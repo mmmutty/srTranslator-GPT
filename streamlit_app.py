@@ -84,12 +84,34 @@ def split_srt_blocks(srt_content):
     content = srt_content.replace('\r\n', '\n').replace('\r', '\n')
     return [b for b in re.split(r'\n\s*\n', content.strip()) if b.strip()]
 
-def translate_batch(lines, api_key, model_name, movie_title, target_lang, style_guide, previous_summary):
+def calculate_max_chars(timecode_line):
+    """タイムコードから表示秒数を計算し、1秒=4文字ルールの文字数上限を返す"""
+    try:
+        start_str, end_str = timecode_line.split('-->')
+        
+        def parse_seconds(t_str):
+            h, m, s_ms = t_str.strip().split(':')
+            s, ms = s_ms.replace(',', '.').split('.')
+            return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
+            
+        duration = parse_seconds(end_str) - parse_seconds(start_str)
+        
+        # 1秒=4文字。ただし最低でも5文字分は確保し、最大は30文字（約2行分）で頭打ちにする
+        max_chars = max(5, min(int(duration * 4), 30))
+        return max_chars
+    except:
+        return 20 # エラー時は安全のために20文字をデフォルトとする
+
+def translate_batch(items, api_key, model_name, movie_title, target_lang, style_guide, previous_summary):
+    # items は [{"text": "Hello", "max_chars": 12}, ...] のような辞書のリストになります
     url = "https://api.openai.com/v1/chat/completions"
     headers = {'Content-Type': 'application/json', 'Authorization': f'Bearer {api_key}'}
 
-    # ★AIが混乱しないよう、入力に「番号札(ID)」をつけて辞書型（JSON）にする
-    input_dict = {str(i+1): line for i, line in enumerate(lines)}
+    # 入力データを「ID: {text, max_chars}」の形にする
+    input_dict = {
+        str(i+1): {"text": item["text"], "max_chars_limit": item["max_chars"]} 
+        for i, item in enumerate(items)
+    }
     input_text = json.dumps(input_dict, ensure_ascii=False)
     
     context_str = ""
@@ -98,13 +120,17 @@ def translate_batch(lines, api_key, model_name, movie_title, target_lang, style_
 
     system_prompt = f"""
     You are a professional subtitle translator for "{movie_title}".
-    Translate the provided JSON values into natural {target_lang}.
+    Translate the provided JSON texts into natural {target_lang}.
     {context_str}
-    Rules:
+    
+    CRITICAL RULES FOR SUBTITLES:
     1. Output MUST be a valid JSON object matching the input keys (IDs).
-    2. Do NOT translate the keys, only translate the values.
-    Example Output:
-    {{"1": "こんにちは。", "2": "元気？"}}
+       Example Output format: {{"1": "こんにちは", "2": "元気？"}}
+    2. STRICT LENGTH LIMIT PER ITEM: 
+       You MUST strictly limit your translation length to the `max_chars_limit` specified for each ID.
+       (e.g., If max_chars_limit is 8, your Japanese translation must be 8 characters or fewer.)
+    3. NUANCE PRESERVATION:
+       Do not translate word-for-word. Summarize to fit the limit, BUT absorb the nuance, emotion, and tone into natural Japanese sentence-ending particles (e.g., 〜よね, 〜さ, 〜だわ). Keep the character's soul alive.
     """
 
     data = {
@@ -114,39 +140,31 @@ def translate_batch(lines, api_key, model_name, movie_title, target_lang, style_
             {"role": "user", "content": input_text}
         ],
         "response_format": {"type": "json_object"},
-        # ★思考時間と出力をカバーするために、出力上限をたっぷり確保
         "max_completion_tokens": 4000 
     }
 
-    for _ in range(3): # エラー時は3回まで再挑戦
+    for _ in range(3):
         try:
             res = requests.post(url, headers=headers, data=json.dumps(data), timeout=150)
             if res.status_code == 200:
                 content = res.json()['choices'][0]['message']['content']
                 parsed = json.loads(content)
                 
-                # ★番号札（ID）に基づいて順番通りに翻訳リストを再構築
                 translated_lines = []
-                for i in range(len(lines)):
+                for i in range(len(items)):
                     key = str(i + 1)
                     if key in parsed and parsed[key].strip():
                         translated_lines.append(parsed[key])
                     else:
-                        # もしAIが翻訳を忘れた行があっても、その1行だけ原文を残して他は救う
-                        translated_lines.append(lines[i]) 
+                        translated_lines.append(items[i]["text"]) 
                 return translated_lines
-
             elif res.status_code == 429:
                 time.sleep(5)
                 continue
-            else:
-                print(f"Translation Error: {res.text}")
-                time.sleep(2)
         except Exception as e:
-            print(f"Exception: {e}")
             time.sleep(2)
             
-    return lines # 3回とも失敗した時だけ、そのバッチ全体を原文で返す
+    return [item["text"] for item in items]
 
 # ==========================================
 # 🖥️ Main App
@@ -204,10 +222,13 @@ def main():
                 if len(lines) >= 3:
                     t_idx = next((i for i, l in enumerate(lines) if '-->' in l), -1)
                     if t_idx != -1:
+                        timecode = lines[t_idx]
+                        max_c = calculate_max_chars(timecode) # ★ここで文字数を計算
                         parsed_blocks.append({
                             "header": lines[:t_idx+1],
                             "text": "\n".join(lines[t_idx+1:]),
-                            "original_block": b
+                            "original_block": b,
+                            "max_chars": max_c # ★保存しておく
                         })
                     else:
                         parsed_blocks.append({"original_block": b, "text": ""})
@@ -221,11 +242,13 @@ def main():
 
             for i in range(0, len(parsed_blocks), batch_size):
                 batch = parsed_blocks[i : i + batch_size]
-                texts_to_translate = [b["text"] for b in batch if b.get("text")]
+                # 変更前: texts_to_translate = [b["text"] for b in batch if b.get("text")]
+                # ▼変更後▼
+                items_to_translate = [{"text": b["text"], "max_chars": b["max_chars"]} for b in batch if b.get("text")]
                 
-                if texts_to_translate:
+                if items_to_translate:
                     translations = translate_batch(
-                        texts_to_translate, api_key, model, title, lang, style_guide, previous_context_summary
+                        items_to_translate, api_key, model, title, lang, style_guide, previous_context_summary
                     )
                     
                     trans_idx = 0
