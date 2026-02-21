@@ -126,14 +126,16 @@ def translate_batch(items, api_key, model_name, movie_title, target_lang, style_
     1. Output MUST be a valid JSON object matching the input keys (IDs).
        Example: {{"1": "Translated text 1", "2": "Translated text 2"}}
        
-    2. LENGTH LIMIT vs NATURALNESS (Very Important): 
-       Try to limit your translation length to the `max_chars_limit` specified for each ID.
-       HOWEVER, NEVER sacrifice natural grammar of {target_lang}. 
-       Do not omit necessary grammatical parts (like particles, pronouns, conjunctions) just to save space. Do not use robotic, fragmented, or telegraphic language.
-       If strictly keeping the character limit makes the {target_lang} unnatural, you are ALLOWED to exceed the limit slightly to maintain a natural, conversational flow.
+    2. LENGTH LIMIT vs NATURALNESS (The Golden Balance):
+       - You must aim to stay within the `max_chars_limit`.
+       - FATAL ERROR: DO NOT use robotic, fragmented, or telegraphic language (e.g., dropping essential grammatical particles like てにをは in Japanese).
+       - To save space, DO NOT just delete words. Instead, PARAPHRASE into concise, natural conversational expressions.
+       - (Bad/Robotic Example): "映画も奴ら製" 
+       - (Good/Natural Example): "映画も奴らの仕業さ" or "映画も奴らが作った"
+       - If you must choose between "sounding like a robot" and "exceeding the limit by 2-3 characters", choose exceeding the limit slightly. But try your absolute best to paraphrase nicely within the limit.
        
     3. NUANCE PRESERVATION:
-       Absorb the nuance, emotion, and tone into natural phrasing typical for native speakers of {target_lang}. Keep the dialogue completely natural.
+       Absorb the emotion and tone into natural phrasing typical for native speakers of {target_lang}. Keep the dialogue completely natural and human-like.
     """
 
     data = {
