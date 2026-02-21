@@ -3,7 +3,7 @@ import re
 import time
 import json
 import requests
-import pandas as pd  # ★表を作るために追加
+import pandas as pd
 from bs4 import BeautifulSoup
 from duckduckgo_search import DDGS
 
@@ -12,11 +12,11 @@ from duckduckgo_search import DDGS
 # ==========================================
 
 CANDIDATE_MODELS = [
-    "gpt-5.2",          # 【本命】推奨：賢くて4oより少し安い
-    "gpt-5-mini",       # 【コスパ】テスト用
-    "gpt-5.2-pro",      # 【超高性能】思考型
-    "gpt-4o",           # 【安定】
-    "gpt-5-nano"        # 【最安】
+    "gpt-5.2",          
+    "gpt-5-mini",       
+    "gpt-5.2-pro",      
+    "gpt-4o",           
+    "gpt-5-nano"        
 ]
 
 BATCH_SIZE = 20 
@@ -56,7 +56,6 @@ def generate_style_guide(api_key, movie_title, raw_web_text):
     except: return None
 
 def check_api(api_key):
-    """API接続テスト"""
     try:
         headers = {'Authorization': f'Bearer {api_key}'}
         data = {
@@ -65,14 +64,10 @@ def check_api(api_key):
             "max_completion_tokens": 100 
         }
         res = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=data, timeout=10)
-        
         if res.status_code == 200:
             return True, "OK"
         else:
-            try:
-                err_msg = res.json().get('error', {}).get('message', res.text)
-            except:
-                err_msg = res.text
+            err_msg = res.json().get('error', {}).get('message', res.text) if hasattr(res, 'json') else res.text
             return False, f"API Error ({res.status_code}): {err_msg}"
     except Exception as e:
         return False, f"Connection Error: {str(e)}"
@@ -81,8 +76,8 @@ def split_srt_blocks(srt_content):
     content = srt_content.replace('\r\n', '\n').replace('\r', '\n')
     return [b for b in re.split(r'\n\s*\n', content.strip()) if b.strip()]
 
-def calculate_max_chars(timecode_line):
-    """タイムコードから表示秒数を計算し、文字数上限を返す"""
+def calculate_max_chars(timecode_line, target_lang):
+    """言語に応じて1秒あたりの文字数上限を動的に計算する"""
     try:
         start_str, end_str = timecode_line.split('-->')
         def parse_seconds(t_str):
@@ -91,10 +86,21 @@ def calculate_max_chars(timecode_line):
             return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
             
         duration = parse_seconds(end_str) - parse_seconds(start_str)
-        max_chars = max(5, min(int(duration * 4), 30))
+        
+        # ターゲット言語が文字ベース(CJK)か、単語ベース(アルファベット等)かを判定
+        cjk_keywords = ['japanese', 'korean', 'chinese', '日本語', '한국어', '中文', '台湾華語']
+        is_cjk = any(keyword in target_lang.lower() for keyword in cjk_keywords)
+        
+        if is_cjk:
+            # アジア圏: 1秒=4〜4.5文字, 最大30文字
+            max_chars = max(5, min(int(duration * 4.5), 30))
+        else:
+            # アルファベット圏: 1秒=15文字, 最大80文字（約2行分）
+            max_chars = max(15, min(int(duration * 15), 80))
+            
         return max_chars
     except:
-        return 20
+        return 30 # 計算失敗時のデフォルト
 
 def translate_batch(items, api_key, model_name, movie_title, target_lang, style_guide, previous_summary):
     url = "https://api.openai.com/v1/chat/completions"
@@ -110,6 +116,7 @@ def translate_batch(items, api_key, model_name, movie_title, target_lang, style_
     if style_guide: context_str += f"[MOVIE INFO]\n{style_guide}\n"
     if previous_summary: context_str += f"[PREVIOUS CONTEXT]\n{previous_summary}\n"
 
+    # ★プロンプトを「指定言語の自然な文法を最優先する」多言語対応に変更
     system_prompt = f"""
     You are a professional subtitle translator for "{movie_title}".
     Translate the provided JSON texts into natural {target_lang}.
@@ -117,12 +124,16 @@ def translate_batch(items, api_key, model_name, movie_title, target_lang, style_
     
     CRITICAL RULES FOR SUBTITLES:
     1. Output MUST be a valid JSON object matching the input keys (IDs).
-       Example Output format: {{"1": "こんにちは", "2": "元気？"}}
-    2. STRICT LENGTH LIMIT PER ITEM: 
-       You MUST strictly limit your translation length to the `max_chars_limit` specified for each ID.
-       (e.g., If max_chars_limit is 8, your Japanese translation must be 8 characters or fewer.)
+       Example: {{"1": "Translated text 1", "2": "Translated text 2"}}
+       
+    2. LENGTH LIMIT vs NATURALNESS (Very Important): 
+       Try to limit your translation length to the `max_chars_limit` specified for each ID.
+       HOWEVER, NEVER sacrifice natural grammar of {target_lang}. 
+       Do not omit necessary grammatical parts (like particles, pronouns, conjunctions) just to save space. Do not use robotic, fragmented, or telegraphic language.
+       If strictly keeping the character limit makes the {target_lang} unnatural, you are ALLOWED to exceed the limit slightly to maintain a natural, conversational flow.
+       
     3. NUANCE PRESERVATION:
-       Do not translate word-for-word. Summarize to fit the limit, BUT absorb the nuance, emotion, and tone into natural Japanese sentence-ending particles (e.g., 〜よね, 〜さ, 〜だわ). Keep the character's soul alive.
+       Absorb the nuance, emotion, and tone into natural phrasing typical for native speakers of {target_lang}. Keep the dialogue completely natural.
     """
 
     data = {
@@ -133,7 +144,7 @@ def translate_batch(items, api_key, model_name, movie_title, target_lang, style_
         ],
         "response_format": {"type": "json_object"},
         "max_completion_tokens": 4000,
-        "temperature": 0.3 # ★AIの「ルール破り」を減らすために少し低めに設定
+        "temperature": 0.3
     }
 
     for _ in range(3):
@@ -193,7 +204,6 @@ def main():
         if is_connected:
             status.success("✅ Connected!")
             
-            # 1. Context Search
             style_guide = None
             if use_context and title:
                 status.info("🌍 Searching context...")
@@ -204,7 +214,6 @@ def main():
                 else:
                     st.warning("Web search found nothing, proceeding without context.")
 
-            # 2. Prepare Blocks
             raw = uploaded_file.getvalue().decode("utf-8", errors="ignore")
             blocks = split_srt_blocks(raw)
             total_blocks = len(blocks)
@@ -216,7 +225,8 @@ def main():
                     t_idx = next((i for i, l in enumerate(lines) if '-->' in l), -1)
                     if t_idx != -1:
                         timecode = lines[t_idx]
-                        max_c = calculate_max_chars(timecode) 
+                        # ★ここでターゲット言語（lang）も渡して計算する
+                        max_c = calculate_max_chars(timecode, lang) 
                         parsed_blocks.append({
                             "header": lines[:t_idx+1],
                             "text": "\n".join(lines[t_idx+1:]),
@@ -230,11 +240,9 @@ def main():
 
             translated_srt = []
             previous_context_summary = ""
-            
-            # ★文字数オーバーを記録するリスト
             overflow_reports = []
             
-            status.info(f"🚀 Translating {total_blocks} lines using {model}...")
+            status.info(f"🚀 Translating {total_blocks} lines into {lang} using {model}...")
 
             for i in range(0, len(parsed_blocks), batch_size):
                 batch = parsed_blocks[i : i + batch_size]
@@ -254,7 +262,7 @@ def main():
                             translated_srt.append(new_block)
                             current_batch_text += t_text + " "
                             
-                            # ★文字数チェック（改行コードを除外して純粋な文字数をカウント）
+                            # 文字数チェック
                             pure_text_len = len(t_text.replace('\n', '').replace('\r', ''))
                             if pure_text_len > b["max_chars"]:
                                 overflow_reports.append({
@@ -281,7 +289,6 @@ def main():
             p_bar.progress(1.0)
             status.success("✅ Translation Done!")
             
-            # ダウンロードボタン
             st.download_button(
                 "📥 Download Translated SRT", 
                 "".join(translated_srt).encode('utf-8-sig'), 
@@ -290,12 +297,10 @@ def main():
             
             st.markdown("---")
             
-            # ★文字数オーバーのレポート表示
             st.subheader("📊 翻訳クオリティ・レポート")
             if overflow_reports:
-                st.warning(f"⚠️ {len(overflow_reports)} 個の字幕が「1秒4文字のルール（最大30文字）」をオーバーしています。手動での微調整をおすすめします。")
+                st.warning(f"⚠️ {len(overflow_reports)} 個の字幕が「{lang}の文字数制限」をオーバーしています。")
                 df_report = pd.DataFrame(overflow_reports)
-                # DataFrameを画面いっぱいにリッチに表示
                 st.dataframe(df_report, use_container_width=True)
             else:
                 st.success("✨ 素晴らしい！すべての字幕が文字数制限内に収まっています。")
