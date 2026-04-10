@@ -26,29 +26,51 @@ BATCH_SIZE = 20
 # ==========================================
 
 def search_movie_context(movie_title):
-    query = f"{movie_title} movie script synopsis characters plot"
+    """検索クエリを最適化し、ヒット率を向上"""
+    query = f"movie '{movie_title}' plot summary tone"
     try:
-        results = DDGS().text(query, max_results=3)
-        if not results: return None
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=4))
+            
+        if not results:
+            return None
+            
         combined_text = ""
         for res in results:
             try:
-                page = requests.get(res['href'], timeout=3)
+                page = requests.get(res['href'], timeout=5)
                 if page.status_code == 200:
                     soup = BeautifulSoup(page.content, 'html.parser')
+                    for s in soup(['script', 'style']): s.decompose()
                     paragraphs = [p.get_text() for p in soup.find_all('p')]
-                    combined_text += " ".join(paragraphs)[:3000]
+                    combined_text += " ".join(paragraphs)[:2000]
             except: continue
+            
         return combined_text if combined_text else None
-    except: return None
+    except Exception:
+        return None
 
-def generate_style_guide(api_key, movie_title, raw_web_text):
+def generate_style_guide(api_key, movie_title, raw_text):
+    """ハルシネーションを防ぐため、ジャンルとトーンだけを抽出"""
     url = "https://api.openai.com/v1/chat/completions"
     headers = {'Content-Type': 'application/json', 'Authorization': f'Bearer {api_key}'}
-    prompt = f"Read the info about '{movie_title}' and create a translation style guide."
+    
+    prompt = f"""
+    Read the provided information about the movie "{movie_title}".
+    Create a very brief translation style guide focusing ONLY on:
+    1. Genre & Overall Tone (e.g., Sci-fi thriller, dark and serious)
+    2. General Speaking Styles (e.g., natural, polite, or rough)
+    
+    Keep it concise. Do not guess character relationships if not explicitly stated.
+    """
+    
     data = {
         "model": "gpt-5-mini", 
-        "messages": [{"role": "system", "content": prompt}, {"role": "user", "content": raw_web_text}]
+        "messages": [
+            {"role": "system", "content": prompt}, 
+            {"role": "user", "content": raw_text}
+        ],
+        "temperature": 0.0 # ★想像を排除し、事実のみにフォーカス
     }
     try:
         res = requests.post(url, headers=headers, data=json.dumps(data), timeout=20)
@@ -56,12 +78,15 @@ def generate_style_guide(api_key, movie_title, raw_web_text):
     except: return None
 
 def check_api(api_key):
+    """API接続テスト（1単語返答で思考トークン上限エラーを回避）"""
     try:
         headers = {'Authorization': f'Bearer {api_key}'}
         data = {
             "model": "gpt-5-mini", 
-            "messages": [{"role":"user", "content":"hi"}], 
-            "max_completion_tokens": 100 
+            "messages": [
+                {"role": "system", "content": "Reply with exactly one word."},
+                {"role": "user", "content": "hi"}
+            ]
         }
         res = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=data, timeout=10)
         if res.status_code == 200:
@@ -87,20 +112,17 @@ def calculate_max_chars(timecode_line, target_lang):
             
         duration = parse_seconds(end_str) - parse_seconds(start_str)
         
-        # ターゲット言語が文字ベース(CJK)か、単語ベース(アルファベット等)かを判定
         cjk_keywords = ['japanese', 'korean', 'chinese', '日本語', '한국어', '中文', '台湾華語']
         is_cjk = any(keyword in target_lang.lower() for keyword in cjk_keywords)
         
         if is_cjk:
-            # アジア圏: 1秒=4〜4.5文字, 最大30文字
             max_chars = max(5, min(int(duration * 4.5), 30))
         else:
-            # アルファベット圏: 1秒=15文字, 最大80文字（約2行分）
             max_chars = max(15, min(int(duration * 15), 80))
             
         return max_chars
     except:
-        return 30 # 計算失敗時のデフォルト
+        return 30 
 
 def translate_batch(items, api_key, model_name, movie_title, target_lang, style_guide, previous_summary):
     url = "https://api.openai.com/v1/chat/completions"
@@ -116,7 +138,6 @@ def translate_batch(items, api_key, model_name, movie_title, target_lang, style_
     if style_guide: context_str += f"[MOVIE INFO]\n{style_guide}\n"
     if previous_summary: context_str += f"[PREVIOUS CONTEXT]\n{previous_summary}\n"
 
-    # ★プロンプトを「指定言語の自然な文法を最優先する」多言語対応に変更
     system_prompt = f"""
     You are a professional subtitle translator for "{movie_title}".
     Translate the provided JSON texts into natural {target_lang}.
@@ -128,11 +149,9 @@ def translate_batch(items, api_key, model_name, movie_title, target_lang, style_
        
     2. LENGTH LIMIT vs NATURALNESS (The Golden Balance):
        - You must aim to stay within the `max_chars_limit`.
-       - FATAL ERROR: DO NOT use robotic, fragmented, or telegraphic language (e.g., dropping essential grammatical particles like てにをは in Japanese).
+       - FATAL ERROR: DO NOT use robotic, fragmented, or telegraphic language (e.g., dropping essential grammatical particles).
        - To save space, DO NOT just delete words. Instead, PARAPHRASE into concise, natural conversational expressions.
-       - (Bad/Robotic Example): "映画も奴ら製" 
-       - (Good/Natural Example): "映画も奴らの仕業さ" or "映画も奴らが作った"
-       - If you must choose between "sounding like a robot" and "exceeding the limit by 2-3 characters", choose exceeding the limit slightly. But try your absolute best to paraphrase nicely within the limit.
+       - If you must choose between "sounding like a robot" and "exceeding the limit by a few characters", choose exceeding the limit slightly. But try your absolute best to paraphrase nicely within the limit.
        
     3. NUANCE PRESERVATION:
        Absorb the emotion and tone into natural phrasing typical for native speakers of {target_lang}. Keep the dialogue completely natural and human-like.
@@ -227,7 +246,6 @@ def main():
                     t_idx = next((i for i, l in enumerate(lines) if '-->' in l), -1)
                     if t_idx != -1:
                         timecode = lines[t_idx]
-                        # ★ここでターゲット言語（lang）も渡して計算する
                         max_c = calculate_max_chars(timecode, lang) 
                         parsed_blocks.append({
                             "header": lines[:t_idx+1],
@@ -264,7 +282,6 @@ def main():
                             translated_srt.append(new_block)
                             current_batch_text += t_text + " "
                             
-                            # 文字数チェック
                             pure_text_len = len(t_text.replace('\n', '').replace('\r', ''))
                             if pure_text_len > b["max_chars"]:
                                 overflow_reports.append({
