@@ -12,11 +12,11 @@ from duckduckgo_search import DDGS
 # ==========================================
 
 CANDIDATE_MODELS = [
-    "gpt-5.2",          
-    "gpt-5-mini",       
-    "gpt-5.2-pro",      
-    "gpt-4o",           
-    "gpt-5-nano"        
+    "gpt-5.5-instant",  # 【本命・推奨】賢くて速い。コストと精度のバランスが最強
+    "gpt-5.5",          # 【最高品質】複雑な文脈やニュアンスの維持が完璧（本気モード）
+    "gpt-5.4-mini",     # 【高コスパ】大量の翻訳を安く早く回すのに最適
+    "gpt-5.4-nano",     # 【最安】API最安値クラス。テスト用に
+    "gpt-5.2"           # 【予備】これまでの安定版
 ]
 
 BATCH_SIZE = 20 
