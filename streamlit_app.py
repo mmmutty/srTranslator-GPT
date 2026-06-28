@@ -12,11 +12,8 @@ from duckduckgo_search import DDGS
 # ==========================================
 
 CANDIDATE_MODELS = [
-    "gpt-5.4-mini",           # 【確実・大本命】現在の超優秀な主力モデル
-    "gpt-4o-mini",      # 【確実・コスパ】安くて速い最高峰
-    "gpt-5",            # 【もし使えれば】GPT-5の基本モデル
-    "gpt-5-turbo",      # 【もし使えれば】GPT-5の高速版
-    "gpt-5.5"           # 【もし使えれば】ユーザー様が確認された最新版
+    "gpt-4o-mini",      # 【確実・コスパ】安くて速い最高峰 (5.4-mini等は架空のため標準に)
+    "gpt-4o",           # 【高品質】賢さを優先する場合
 ]
 
 BATCH_SIZE = 20 
@@ -25,12 +22,45 @@ BATCH_SIZE = 20
 # 🛠️ Helper Functions
 # ==========================================
 
+def fetch_wikipedia_summary(title, lang="en"):
+    """Wikipedia APIを使用して映画のあらすじを取得する"""
+    search_url = f"https://{lang}.wikipedia.org/w/api.php"
+    search_params = {
+        "action": "query", "format": "json",
+        "list": "search", "srsearch": f"{title} film OR movie", "utf8": 1
+    }
+    try:
+        res = requests.get(search_url, params=search_params, timeout=5).json()
+        if res.get("query", {}).get("search"):
+            page_id = res["query"]["search"][0]["pageid"]
+            
+            page_params = {
+                "action": "query", "format": "json",
+                "prop": "extracts", "pageids": page_id,
+                "exintro": 1, "explaintext": 1
+            }
+            page_res = requests.get(search_url, params=page_params, timeout=5).json()
+            extract = page_res["query"]["pages"][str(page_id)].get("extract", "")
+            return extract if len(extract) > 100 else None
+    except Exception:
+        pass
+    return None
+
 def search_movie_context(movie_title):
-    """検索クエリを最適化し、ヒット率を向上"""
+    """Wikipediaを優先し、ダメならDDGSで検索してヒット率を向上"""
+    # 1. まずは英語のWikipediaを探す（情報量が一番多い）
+    summary = fetch_wikipedia_summary(movie_title, "en")
+    if summary: return summary
+    
+    # 2. 次に日本語のWikipediaを探す
+    summary = fetch_wikipedia_summary(movie_title, "ja")
+    if summary: return summary
+
+    # 3. どちらもダメならDuckDuckGoで検索
     query = f"movie '{movie_title}' plot summary tone"
     try:
         with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=4))
+            results = list(ddgs.text(query, max_results=3))
             
         if not results:
             return None
@@ -43,7 +73,7 @@ def search_movie_context(movie_title):
                     soup = BeautifulSoup(page.content, 'html.parser')
                     for s in soup(['script', 'style']): s.decompose()
                     paragraphs = [p.get_text() for p in soup.find_all('p')]
-                    combined_text += " ".join(paragraphs)[:2000]
+                    combined_text += " ".join(paragraphs)[:1500]
             except: continue
             
         return combined_text if combined_text else None
@@ -65,7 +95,7 @@ def generate_style_guide(api_key, movie_title, raw_text):
     """
     
     data = {
-        "model": "gpt-5-mini", 
+        "model": "gpt-4o-mini", # 安定したモデルに変更
         "messages": [
             {"role": "system", "content": prompt}, 
             {"role": "user", "content": raw_text}
@@ -78,11 +108,11 @@ def generate_style_guide(api_key, movie_title, raw_text):
     except: return None
 
 def check_api(api_key):
-    """API接続テスト（1単語返答で思考トークン上限エラーを回避）"""
+    """API接続テスト"""
     try:
         headers = {'Authorization': f'Bearer {api_key}'}
         data = {
-            "model": "gpt-5-mini", 
+            "model": "gpt-4o-mini", 
             "messages": [
                 {"role": "system", "content": "Reply with exactly one word."},
                 {"role": "user", "content": "hi"}
@@ -115,10 +145,11 @@ def calculate_max_chars(timecode_line, target_lang):
         cjk_keywords = ['japanese', 'korean', 'chinese', '日本語', '한국어', '中文', '台湾華語']
         is_cjk = any(keyword in target_lang.lower() for keyword in cjk_keywords)
         
+        # 緩和: 下限を10文字にして、短すぎる時間での不完全な文章化を防ぐ
         if is_cjk:
-            max_chars = max(5, min(int(duration * 4.5), 30))
+            max_chars = max(10, min(int(duration * 5.0), 40))
         else:
-            max_chars = max(15, min(int(duration * 15), 80))
+            max_chars = max(20, min(int(duration * 15), 80))
             
         return max_chars
     except:
@@ -138,23 +169,25 @@ def translate_batch(items, api_key, model_name, movie_title, target_lang, style_
     if style_guide: context_str += f"[MOVIE INFO]\n{style_guide}\n"
     if previous_summary: context_str += f"[PREVIOUS CONTEXT]\n{previous_summary}\n"
 
+    # プロンプト改修: 文章としての成立を「絶対的な最優先」に設定
     system_prompt = f"""
     You are a professional subtitle translator for "{movie_title}".
     Translate the provided JSON texts into natural {target_lang}.
     {context_str}
     
-    CRITICAL RULES FOR SUBTITLES:
-    1. Output MUST be a valid JSON object matching the input keys (IDs).
-       Example: {{"1": "Translated text 1", "2": "Translated text 2"}}
+    CRITICAL RULES FOR SUBTITLES (PRIORITY ORDER):
+    
+    1. COMPLETE & NATURAL SENTENCES (HIGHEST PRIORITY):
+       - The translated text MUST be a complete, grammatically correct, and natural sentence in {target_lang}.
+       - NEVER end a sentence abruptly or drop essential grammatical particles just to save space. 
        
-    2. LENGTH LIMIT vs NATURALNESS (The Golden Balance):
-       - You must aim to stay within the `max_chars_limit`.
-       - FATAL ERROR: DO NOT use robotic, fragmented, or telegraphic language (e.g., dropping essential grammatical particles).
-       - To save space, DO NOT just delete words. Instead, PARAPHRASE into concise, natural conversational expressions.
-       - If you must choose between "sounding like a robot" and "exceeding the limit by a few characters", choose exceeding the limit slightly. But try your absolute best to paraphrase nicely within the limit.
-       
-    3. NUANCE PRESERVATION:
-       Absorb the emotion and tone into natural phrasing typical for native speakers of {target_lang}. Keep the dialogue completely natural and human-like.
+    2. LENGTH LIMIT (`max_chars_limit`):
+       - Try your best to keep the text within the `max_chars_limit` by paraphrasing smartly.
+       - HOWEVER, Rule 1 is absolute. If keeping within the limit causes the text to sound like a robot or become fragmented, YOU MUST EXCEED THE LIMIT. It is perfectly fine to go over the character limit to maintain naturalness.
+
+    3. OUTPUT FORMAT:
+       - Output MUST be a valid JSON object matching the input keys (IDs).
+       - Example: {{"1": "Translated text 1", "2": "Translated text 2"}}
     """
 
     data = {
@@ -164,7 +197,7 @@ def translate_batch(items, api_key, model_name, movie_title, target_lang, style_
             {"role": "user", "content": input_text}
         ],
         "response_format": {"type": "json_object"},
-        "max_completion_tokens": 4000,
+        "max_tokens": 4000,
         "temperature": 0.3
     }
 
@@ -227,13 +260,13 @@ def main():
             
             style_guide = None
             if use_context and title:
-                status.info("🌍 Searching context...")
+                status.info("🌍 Searching context (Wikipedia/Web)...")
                 web_data = search_movie_context(title)
                 if web_data:
                     style_guide = generate_style_guide(api_key, title, web_data)
                     st.expander("Generated Style Guide").markdown(style_guide)
                 else:
-                    st.warning("Web search found nothing, proceeding without context.")
+                    st.warning("Context search found nothing, proceeding without context.")
 
             raw = uploaded_file.getvalue().decode("utf-8", errors="ignore")
             blocks = split_srt_blocks(raw)
@@ -318,7 +351,7 @@ def main():
             
             st.subheader("📊 翻訳クオリティ・レポート")
             if overflow_reports:
-                st.warning(f"⚠️ {len(overflow_reports)} 個の字幕が「{lang}の文字数制限」をオーバーしています。")
+                st.warning(f"⚠️ {len(overflow_reports)} 個の字幕が「{lang}の文字数制限」をオーバーしています。（自然な文章を優先した結果です）")
                 df_report = pd.DataFrame(overflow_reports)
                 st.dataframe(df_report, use_container_width=True)
             else:
