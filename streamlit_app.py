@@ -95,7 +95,7 @@ def generate_style_guide(api_key, movie_title, raw_text):
     """
     
     data = {
-        "model": "gpt-5.4-mini", # バックグラウンド処理も最新のminiモデルに統一
+        "model": "gpt-5.4-mini", 
         "messages": [
             {"role": "system", "content": prompt}, 
             {"role": "user", "content": raw_text}
@@ -112,7 +112,7 @@ def check_api(api_key):
     try:
         headers = {'Authorization': f'Bearer {api_key}'}
         data = {
-            "model": "gpt-5.4-mini", # 接続テストも最新のminiモデルで実行
+            "model": "gpt-5.4-mini", 
             "messages": [
                 {"role": "system", "content": "Reply with exactly one word."},
                 {"role": "user", "content": "hi"}
@@ -168,13 +168,18 @@ def translate_batch(items, api_key, model_name, movie_title, target_lang, style_
     if style_guide: context_str += f"[MOVIE INFO]\n{style_guide}\n"
     if previous_summary: context_str += f"[PREVIOUS CONTEXT]\n{previous_summary}\n"
 
+    # 🔥 改修ポイント1: JSONの出力フォーマット構造の指示を最上部に移動して厳格化
     system_prompt = f"""
     You are a professional subtitle translator for "{movie_title}".
     Translate the provided JSON texts into natural {target_lang}.
     {context_str}
     
-    CRITICAL RULES FOR SUBTITLES (PRIORITY ORDER):
+    CRITICAL OUTPUT FORMAT RULE (MUST OBEY FIRST):
+    - Your response MUST be a valid JSON object matching the input keys (IDs) EXACTLY.
+    - Do not change, omit, or wrap the keys in another object.
+    - Example: {{"1": "Translated text 1", "2": "Translated text 2"}}
     
+    CRITICAL TRANSLATION RULES (PRIORITY ORDER):
     1. COMPLETE & NATURAL SENTENCES (HIGHEST PRIORITY):
        - The translated text MUST be a complete, grammatically correct, and natural sentence in {target_lang}.
        - NEVER end a sentence abruptly or drop essential grammatical particles just to save space. 
@@ -182,10 +187,6 @@ def translate_batch(items, api_key, model_name, movie_title, target_lang, style_
     2. LENGTH LIMIT (`max_chars_limit`):
        - Try your best to keep the text within the `max_chars_limit` by paraphrasing smartly.
        - HOWEVER, Rule 1 is absolute. If keeping within the limit causes the text to sound like a robot or become fragmented, YOU MUST EXCEED THE LIMIT. It is perfectly fine to go over the character limit to maintain naturalness.
-
-    3. OUTPUT FORMAT:
-       - Output MUST be a valid JSON object matching the input keys (IDs).
-       - Example: {{"1": "Translated text 1", "2": "Translated text 2"}}
     """
 
     data = {
@@ -207,10 +208,18 @@ def translate_batch(items, api_key, model_name, movie_title, target_lang, style_
                 parsed = json.loads(content)
                 
                 translated_lines = []
+                # 🔥 改修ポイント2: AIがキー名を間違えた時（"key1"や数値の1などにした時）の救済用リスト
+                parsed_values = list(parsed.values())
+                
                 for i in range(len(items)):
                     key = str(i + 1)
-                    if key in parsed and parsed[key].strip():
-                        translated_lines.append(parsed[key])
+                    # 1. 通常ルート（キーが完全に一致している場合）
+                    if key in parsed and str(parsed[key]).strip():
+                        translated_lines.append(str(parsed[key]))
+                    # 2. 救済ルート（キーが崩れても、データの順番と数が合っていればそこから抽出）
+                    elif i < len(parsed_values) and str(parsed_values[i]).strip() and len(parsed_values) == len(items):
+                        translated_lines.append(str(parsed_values[i]))
+                    # 3. 最悪のケース（何も取得できなかった場合は原文維持）
                     else:
                         translated_lines.append(items[i]["text"]) 
                 return translated_lines
