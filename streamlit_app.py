@@ -168,7 +168,6 @@ def translate_batch(items, api_key, model_name, movie_title, target_lang, style_
     if style_guide: context_str += f"[MOVIE INFO]\n{style_guide}\n"
     if previous_summary: context_str += f"[PREVIOUS CONTEXT]\n{previous_summary}\n"
 
-    # 🔥 改修ポイント1: JSONの出力フォーマット構造の指示を最上部に移動して厳格化
     system_prompt = f"""
     You are a professional subtitle translator for "{movie_title}".
     Translate the provided JSON texts into natural {target_lang}.
@@ -196,37 +195,49 @@ def translate_batch(items, api_key, model_name, movie_title, target_lang, style_
             {"role": "user", "content": input_text}
         ],
         "response_format": {"type": "json_object"},
-        "max_tokens": 4000,
+        "max_completion_tokens": 4000,  # 🔥 元のコードの正しいパラメータに復元しました
         "temperature": 0.3
     }
 
-    for _ in range(3):
+    for attempt in range(3):
         try:
             res = requests.post(url, headers=headers, data=json.dumps(data), timeout=150)
+            
+            # 🔥 正常なレスポンスの場合
             if res.status_code == 200:
                 content = res.json()['choices'][0]['message']['content']
                 parsed = json.loads(content)
                 
                 translated_lines = []
-                # 🔥 改修ポイント2: AIがキー名を間違えた時（"key1"や数値の1などにした時）の救済用リスト
                 parsed_values = list(parsed.values())
                 
                 for i in range(len(items)):
                     key = str(i + 1)
-                    # 1. 通常ルート（キーが完全に一致している場合）
                     if key in parsed and str(parsed[key]).strip():
                         translated_lines.append(str(parsed[key]))
-                    # 2. 救済ルート（キーが崩れても、データの順番と数が合っていればそこから抽出）
                     elif i < len(parsed_values) and str(parsed_values[i]).strip() and len(parsed_values) == len(items):
                         translated_lines.append(str(parsed_values[i]))
-                    # 3. 最悪のケース（何も取得できなかった場合は原文維持）
                     else:
                         translated_lines.append(items[i]["text"]) 
                 return translated_lines
+                
+            # 🔥 API制限（レートリミット）の場合のみリトライ
             elif res.status_code == 429:
                 time.sleep(5)
                 continue
+                
+            # 🔥 それ以外のエラー（400エラー等）は握り潰さずに例外を発生させる！
+            else:
+                try:
+                    err_msg = res.json().get('error', {}).get('message', res.text)
+                except:
+                    err_msg = res.text
+                raise Exception(f"API Error {res.status_code}: {err_msg}")
+                
         except Exception as e:
+            # 致命的なAPIエラー（モデル不正など）はリトライせずに直ちに親関数へ投げる
+            if "API Error" in str(e) or attempt == 2:
+                raise e
             time.sleep(2)
             
     return [item["text"] for item in items]
@@ -304,39 +315,54 @@ def main():
             
             status.info(f"🚀 Translating {total_blocks} lines into {lang} using {model}...")
 
+            # 🔥 エラー検知用のフラグ
+            has_critical_error = False
+
             for i in range(0, len(parsed_blocks), batch_size):
+                if has_critical_error: break # エラー発生時はループを抜ける
+
                 batch = parsed_blocks[i : i + batch_size]
                 items_to_translate = [{"text": b["text"], "max_chars": b["max_chars"]} for b in batch if b.get("text")]
                 
                 if items_to_translate:
-                    translations = translate_batch(
-                        items_to_translate, api_key, model, title, lang, style_guide, previous_context_summary
-                    )
-                    
-                    trans_idx = 0
-                    current_batch_text = ""
-                    for b in batch:
-                        if b.get("text"):
-                            t_text = translations[trans_idx] if trans_idx < len(translations) else b["text"]
-                            new_block = "\n".join(b["header"]) + "\n" + t_text + "\n\n"
-                            translated_srt.append(new_block)
-                            current_batch_text += t_text + " "
-                            
-                            pure_text_len = len(t_text.replace('\n', '').replace('\r', ''))
-                            if pure_text_len > b["max_chars"]:
-                                overflow_reports.append({
-                                    "No.": b["header"][0].strip(),
-                                    "制限": b["max_chars"],
-                                    "実際の文字数": pure_text_len,
-                                    "オーバー量": f"+{pure_text_len - b['max_chars']}",
-                                    "翻訳結果": t_text.replace('\n', ' ')
-                                })
-                            
-                            trans_idx += 1
-                        else:
-                            translated_srt.append(b["original_block"] + "\n\n")
-                    
-                    previous_context_summary = current_batch_text[-200:]
+                    try:
+                        # 🔥 翻訳実行
+                        translations = translate_batch(
+                            items_to_translate, api_key, model, title, lang, style_guide, previous_context_summary
+                        )
+                        
+                        trans_idx = 0
+                        current_batch_text = ""
+                        for b in batch:
+                            if b.get("text"):
+                                t_text = translations[trans_idx] if trans_idx < len(translations) else b["text"]
+                                new_block = "\n".join(b["header"]) + "\n" + t_text + "\n\n"
+                                translated_srt.append(new_block)
+                                current_batch_text += t_text + " "
+                                
+                                pure_text_len = len(t_text.replace('\n', '').replace('\r', ''))
+                                if pure_text_len > b["max_chars"]:
+                                    overflow_reports.append({
+                                        "No.": b["header"][0].strip(),
+                                        "制限": b["max_chars"],
+                                        "実際の文字数": pure_text_len,
+                                        "オーバー量": f"+{pure_text_len - b['max_chars']}",
+                                        "翻訳結果": t_text.replace('\n', ' ')
+                                    })
+                                
+                                trans_idx += 1
+                            else:
+                                translated_srt.append(b["original_block"] + "\n\n")
+                        
+                        previous_context_summary = current_batch_text[-200:]
+                        
+                    except Exception as e:
+                        # 🔥 APIエラー発生時：無駄遣いを防ぐため即座に画面に表示して処理をストップ
+                        st.error(f"❌ 翻訳処理を緊急停止しました（APIの無駄遣いを防ぐため）。\n原因: {e}")
+                        status.error("🚨 エラーが発生したため翻訳が中断されました。")
+                        has_critical_error = True
+                        break
+                        
                 else:
                     for b in batch:
                         translated_srt.append(b["original_block"] + "\n\n")
@@ -345,24 +371,25 @@ def main():
                 p_bar.progress(progress)
                 log.text(f"Processing... {i}/{total_blocks}")
 
-            p_bar.progress(1.0)
-            status.success("✅ Translation Done!")
-            
-            st.download_button(
-                "📥 Download Translated SRT", 
-                "".join(translated_srt).encode('utf-8-sig'), 
-                f"{uploaded_file.name}_AI.srt"
-            )
-            
-            st.markdown("---")
-            
-            st.subheader("📊 翻訳クオリティ・レポート")
-            if overflow_reports:
-                st.warning(f"⚠️ {len(overflow_reports)} 個の字幕が「{lang}の文字数制限」をオーバーしています。（自然な文章を優先した結果です）")
-                df_report = pd.DataFrame(overflow_reports)
-                st.dataframe(df_report, use_container_width=True)
-            else:
-                st.success("✨ 素晴らしい！すべての字幕が文字数制限内に収まっています。")
+            if not has_critical_error:
+                p_bar.progress(1.0)
+                status.success("✅ Translation Done!")
+                
+                st.download_button(
+                    "📥 Download Translated SRT", 
+                    "".join(translated_srt).encode('utf-8-sig'), 
+                    f"{uploaded_file.name}_AI.srt"
+                )
+                
+                st.markdown("---")
+                
+                st.subheader("📊 翻訳クオリティ・レポート")
+                if overflow_reports:
+                    st.warning(f"⚠️ {len(overflow_reports)} 個の字幕が「{lang}の文字数制限」をオーバーしています。（自然な文章を優先した結果です）")
+                    df_report = pd.DataFrame(overflow_reports)
+                    st.dataframe(df_report, use_container_width=True)
+                else:
+                    st.success("✨ 素晴らしい！すべての字幕が文字数制限内に収まっています。")
 
         else:
             st.error(f"❌ Connection Failed.\nReason: {msg}")
