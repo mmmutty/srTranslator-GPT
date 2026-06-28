@@ -12,8 +12,11 @@ from duckduckgo_search import DDGS
 # ==========================================
 
 CANDIDATE_MODELS = [
-    "gpt-4o-mini",      # 【確実・コスパ】安くて速い最高峰 (5.4-mini等は架空のため標準に)
-    "gpt-4o",           # 【高品質】賢さを優先する場合
+    "gpt-5.4-mini",     # 【確実・大本命】現在の超優秀な主力モデル
+    "gpt-5.5",          # 最新のプロフェッショナル向け高知能モデル
+    "gpt-5.4",          # スケール・エージェント向け
+    "gpt-5",            
+    "gpt-5-turbo"       
 ]
 
 BATCH_SIZE = 20 
@@ -48,15 +51,12 @@ def fetch_wikipedia_summary(title, lang="en"):
 
 def search_movie_context(movie_title):
     """Wikipediaを優先し、ダメならDDGSで検索してヒット率を向上"""
-    # 1. まずは英語のWikipediaを探す（情報量が一番多い）
     summary = fetch_wikipedia_summary(movie_title, "en")
     if summary: return summary
     
-    # 2. 次に日本語のWikipediaを探す
     summary = fetch_wikipedia_summary(movie_title, "ja")
     if summary: return summary
 
-    # 3. どちらもダメならDuckDuckGoで検索
     query = f"movie '{movie_title}' plot summary tone"
     try:
         with DDGS() as ddgs:
@@ -95,12 +95,12 @@ def generate_style_guide(api_key, movie_title, raw_text):
     """
     
     data = {
-        "model": "gpt-4o-mini", # 安定したモデルに変更
+        "model": "gpt-5.4-mini", # バックグラウンド処理も最新のminiモデルに統一
         "messages": [
             {"role": "system", "content": prompt}, 
             {"role": "user", "content": raw_text}
         ],
-        "temperature": 0.0 # ★想像を排除し、事実のみにフォーカス
+        "temperature": 0.0 
     }
     try:
         res = requests.post(url, headers=headers, data=json.dumps(data), timeout=20)
@@ -112,7 +112,7 @@ def check_api(api_key):
     try:
         headers = {'Authorization': f'Bearer {api_key}'}
         data = {
-            "model": "gpt-4o-mini", 
+            "model": "gpt-5.4-mini", # 接続テストも最新のminiモデルで実行
             "messages": [
                 {"role": "system", "content": "Reply with exactly one word."},
                 {"role": "user", "content": "hi"}
@@ -145,7 +145,6 @@ def calculate_max_chars(timecode_line, target_lang):
         cjk_keywords = ['japanese', 'korean', 'chinese', '日本語', '한국어', '中文', '台湾華語']
         is_cjk = any(keyword in target_lang.lower() for keyword in cjk_keywords)
         
-        # 緩和: 下限を10文字にして、短すぎる時間での不完全な文章化を防ぐ
         if is_cjk:
             max_chars = max(10, min(int(duration * 5.0), 40))
         else:
@@ -169,7 +168,6 @@ def translate_batch(items, api_key, model_name, movie_title, target_lang, style_
     if style_guide: context_str += f"[MOVIE INFO]\n{style_guide}\n"
     if previous_summary: context_str += f"[PREVIOUS CONTEXT]\n{previous_summary}\n"
 
-    # プロンプト改修: 文章としての成立を「絶対的な最優先」に設定
     system_prompt = f"""
     You are a professional subtitle translator for "{movie_title}".
     Translate the provided JSON texts into natural {target_lang}.
